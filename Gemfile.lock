@@ -1,0 +1,31 @@
+GIT
+  remote: git://github.com/JamesGlover/sequencescape-client-api.git
+  revision: 352ef88784d4c005fe6aad67d6ab0889a5d0eb12
+  branch: dual_indexing_r32
+  specs:
+    sequencescape-client-api (0.2.6)
+      activemodel (~> 3.0.0)
+      activesupport (~> 3.0.0)
+      i18n
+      yajl-ruby (~> 1.1.0)
+
+GEM
+  remote: http://rubygems.org/
+  specs:
+    activemodel (3.0.20)
+      activesupport (= 3.0.20)
+      builder (~> 2.1.2)
+      i18n (~> 0.5.0)
+    activesupport (3.0.20)
+    builder (2.1.2)
+    i18n (0.5.4)
+    yajl-ruby (1.1.0)
+
+PLATFORMS
+  ruby
+
+DEPENDENCIES
+  sequencescape-client-api (>= 0.2.5)!
+
+BUNDLED WITH
+   1.10.6

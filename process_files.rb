@@ -2,25 +2,26 @@
 
 require 'csv'
 require 'fileutils'
-
 require 'net/http'
+
+
+QUANT_SERVICE_HOST="localhost"
+QUANT_SERVICE_PORT="4567"
 
 SS_URL = "http://localhost:3000/api/1/"
 SS_KEY = "development"
 
-
 ARCHIVE_FOLDER = 'archive/'
 INBOX_FOLDER = 'example_files/'
 
-class MoveFile
-  attr_reader :filename
+class FileMove
 
+  attr_reader :filename
 
   def initialize(filename)
     @filename = filename
     @path = INBOX_FOLDER
   end
-
 
   def filename
     @filename
@@ -60,88 +61,69 @@ class MoveFile
     csv_plate_barcode_line
   end
 
-  def get_barcode
-    csv_plate_barcode_line[1] if valid_content?
-  end
-
-end
-
-def get_files_from_folder(folder)
-  Dir.entries(folder)
-end
-
-class ApiConnection
-  attr_reader :host, :port
-
-  def initialize(host, port)
-    @host = host
-    @port = port
-  end
-
-  def headers
-
-  end
-
-  def request_from_path(path, headers)
-    Net::HTTP.new(@host, @port).get2(path, headers)
-  end
-
-  def ss_api
-    self.api ||= Sequencescape::Api.new(:url => SS_URL, :authorisation => SS_KEY)
-  end
-
-end
-
-def request_uuid(barcode)
-  response = ApiConnection.new("localhost", "4567").request_from_path("/assays/#{barcode}/input", { "Content-Type" => "text/uuid" })
-  uuid = response.body unless response.is_a?(Net::HTTPNotFound)
-end
-
-
-def upload_qc_file_to_ss_with_api(uuid, filename)
-  ss_api.find(uuid).qc_files.create_from_file(filename, filename)
-end
-
-def perform_for_file(url, file, filename, headers)
-  uri = URI.parse(url)
-  file_content = file.read
-  puts "file reading: #{file_content}"
-  Net::HTTP.start(uri.host, uri.port) do |connection|
-    #connection.read_timeout = "3000"
-    file_headers = headers.merge!({'Content-Disposition'=> "form-data; filename=\"#{filename}\""})
-    request = Net::HTTP.const_get("Post").new(uri.request_uri, file_headers)
-    request.content_type = 'sequencescape/qc_file'
-    #request.body         = body.to_json
-    request.body         = file_content
-    connection.request(request)
-    #yield(connection.request(request))
+  def barcode
+    csv_plate_barcode_line[1].strip if valid_content?
   end
 end
 
-def upload_qc_file_to_ss_with_http(uuid, current_movefile)
-  perform_for_file(SS_URL+uuid+"/qc_files", File.open(current_movefile.absolute_filename, "r"), current_movefile.filename,  {
-    "X-Sequencescape-Client-ID" => SS_KEY,
-    "Sequencescape-Client-ID" => SS_KEY
-    })
+
+class QuantFileProcess
+
+  attr_reader :uuid, :movefile, :code
+
+  def initialize(movefile)
+    @movefile = movefile
+  end
+
+  def request_from_path(host, port, path, headers)
+    Net::HTTP.new(host, port).get2(path, headers)
+  end
+
+  def request_uuid
+    quant_service_headers = { "Content-Type" => "text/uuid" }
+    quant_service_url = "/assays/#{@movefile.barcode}/input"
+    response = request_from_path(QUANT_SERVICE_HOST, QUANT_SERVICE_PORT, quant_service_url, quant_service_headers)
+    @uuid = response.body unless response.is_a?(Net::HTTPNotFound)
+  end
+
+  def perform_for_file(url, file, filename, headers)
+    uri = URI.parse(url)
+    file_content = file.read
+    Net::HTTP.start(uri.host, uri.port) do |connection|
+      file_headers = headers.merge!({'Content-Disposition'=> "form-data; filename=\"#{filename}\""})
+      request = Net::HTTP.const_get("Post").new(uri.request_uri, file_headers)
+      request.content_type = 'sequencescape/qc_file'
+      request.body         = file_content
+      response = connection.request(request)
+      @code = response.code
+    end
+  end
+
+  def upload_qc_file_to_ss_with_http
+    ss_service_headers = { "X-Sequencescape-Client-ID" => SS_KEY, "Sequencescape-Client-ID" => SS_KEY }
+    perform_for_file(SS_URL+uuid+"/qc_files", File.open(@movefile.absolute_filename, "r"), @movefile.filename,  ss_service_headers)
+  end
+
 end
 
 def process_file(filename)
-  current_movefile = MoveFile.new(filename)
-  current_movefile.lock
+  current_filemove = FileMove.new(filename)
+  current_filemove.lock
 
-  uuid = request_uuid(current_movefile.get_barcode)
+  quant_process = QuantFileProcess.new(current_filemove)
 
-  if uuid
-    upload_qc_file_to_ss_with_http(uuid, current_movefile)
-    #current_movefile.archive
+  quant_process.request_uuid
+  if quant_process.uuid
+    quant_process.upload_qc_file_to_ss_with_http
+    current_filemove.archive(".http_code_#{quant_process.code}")
   else
-    #current_movefile.archive(".unknown_uuid")
+    current_filemove.archive(".unknown_uuid")
   end
 ensure
-  current_movefile.unlock
+  current_filemove.unlock
 end
 
 
-get_files_from_folder(INBOX_FOLDER).each do |filename|
+Dir.entries(INBOX_FOLDER).each do |filename|
   process_file(filename) if filename.match(/\.csv$/i)
 end

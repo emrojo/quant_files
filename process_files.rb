@@ -4,7 +4,6 @@ require 'csv'
 require 'fileutils'
 require 'net/http'
 
-
 QUANT_SERVICE_HOST="localhost"
 QUANT_SERVICE_PORT="4567"
 
@@ -13,10 +12,11 @@ SS_KEY = "development"
 
 ARCHIVE_FOLDER = 'archive/'
 INBOX_FOLDER = 'example_files/'
+ERRORS_FOLDER = 'errors/'
 
 class FileMove
 
-  attr_reader :filename
+  attr_reader :filename, :lock_file, :barcode_line, :processing_csv
 
   def initialize(filename)
     @filename = filename
@@ -35,26 +35,43 @@ class FileMove
     File.exists?(@path + lock_filename)
   end
 
+  def unlocked?
+    !locked?
+  end
+
   def csv_plate_barcode_line
-    CSV.read(absolute_filename).find {|line| line[0] == 'Assay Plate Barcode'}
+    @processing_csv = true
+    @barcode_line ||= CSV.read(absolute_filename).find {|line| line[0] == 'Assay Plate Barcode'}
+    @processing_csv = false
+    barcode_line
+  rescue ArgumentError
+    $stdout.puts "Argument error in csv file #{filename}"
+    barcode_line = nil
   end
 
   public
   def absolute_filename
-    @path + (locked? ?  lock_filename : filename)
+    @path + filename
   end
 
   def lock
-    File.rename(@path + filename, @path + lock_filename)
+    @lock_file = File.open(@path + lock_filename, File::WRONLY|File::CREAT)
+    @lock_file.flock(File::LOCK_EX|File::LOCK_NB)
   end
 
   def unlock
-    File.rename(@path + lock_filename, @path + filename) if locked?
+    if lock_file
+      @lock_file.flock(File::LOCK_UN)
+      File.unlink(@path + lock_filename)
+    end
   end
 
-  def archive(tag="")
-    FileUtils.mv(@path + lock_filename, ARCHIVE_FOLDER + filename + tag)
-    @path = ARCHIVE_FOLDER
+  def move_to_errors
+    FileUtils.mv(@path + filename, ERRORS_FOLDER + filename)
+  end
+
+  def archive
+    FileUtils.mv(@path + filename, ARCHIVE_FOLDER + filename)
   end
 
   def valid_content?
@@ -62,8 +79,19 @@ class FileMove
   end
 
   def barcode
-    csv_plate_barcode_line[1].strip if valid_content?
+    return unless valid_content?
+    csv_plate_barcode_line[1].strip
   end
+
+  def safe_shutdown
+    if processing_csv
+      $stdout.puts "Something went wrong while processing csv file #{filename}"
+      move_to_errors
+    end
+  ensure
+    unlock
+  end
+
 end
 
 
@@ -80,6 +108,7 @@ class QuantFileProcess
   end
 
   def request_uuid
+    return unless movefile.barcode
     quant_service_headers = { "Content-Type" => "text/uuid" }
     quant_service_url = "/assays/#{@movefile.barcode}/input"
     response = request_from_path(QUANT_SERVICE_HOST, QUANT_SERVICE_PORT, quant_service_url, quant_service_headers)
@@ -108,19 +137,24 @@ end
 
 def process_file(filename)
   current_filemove = FileMove.new(filename)
-  current_filemove.lock
-
-  quant_process = QuantFileProcess.new(current_filemove)
-
-  quant_process.request_uuid
-  if quant_process.uuid
-    quant_process.upload_qc_file_to_ss_with_http
-    current_filemove.archive(".http_code_#{quant_process.code}")
-  else
-    current_filemove.archive(".unknown_uuid")
+  if current_filemove.unlocked? && current_filemove.lock
+    return $stdout.puts "Barcode section was not found in the file #{current_filemove.absolute_filename}" unless current_filemove.barcode
+    quant_process = QuantFileProcess.new(current_filemove)
+    quant_process.request_uuid
+    if quant_process.uuid
+      quant_process.upload_qc_file_to_ss_with_http
+      if quant_process.code == 500
+        current_filemove.move_to_errors
+        $stderr.puts "HTTP 500 server side problem"
+      elsif quant_process.code !=503
+        current_filemove.archive
+      end
+    else
+      $stdout.puts "The barcode #{current_filemove.barcode} was not found in quant"
+    end
   end
 ensure
-  current_filemove.unlock
+  current_filemove.safe_shutdown
 end
 
 

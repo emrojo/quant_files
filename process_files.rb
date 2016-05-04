@@ -3,6 +3,8 @@
 require 'csv'
 require 'fileutils'
 require 'net/http'
+require 'logger'
+
 
 QUANT_SERVICE_HOST="localhost"
 QUANT_SERVICE_PORT="4567"
@@ -14,44 +16,42 @@ ARCHIVE_FOLDER = 'archive/'
 INBOX_FOLDER = 'example_files/'
 ERRORS_FOLDER = 'errors/'
 
-class FileMove
 
-  attr_reader :filename, :lock_file, :barcode_line, :processing_csv
+LOG_STDOUT = Logger.new(STDOUT)
+LOG_STDERR = Logger.new(STDERR)
 
-  def initialize(filename)
-    @filename = filename
-    @path = INBOX_FOLDER
+
+module Logging
+  def format_msg(msg)
+    "File:[#{@filename}] - #{msg}"
   end
 
-  def filename
-    @filename
+  def logging_user(msg)
+    LOG_STDOUT.error(format_msg(msg))
   end
+
+  def logging_server(msg)
+    LOG_STDERR.error(format_msg(msg))
+  end
+end
+
+module FileLocking
+  attr_reader :filename, :lock_file, :path
 
   def lock_filename
-    @filename + ".lock"
+    filename + ".lock"
   end
 
   def locked?
-    File.exists?(@path + lock_filename)
+    File.exists?(path + lock_filename)
   end
 
   def unlocked?
     !locked?
   end
 
-  def csv_plate_barcode_line
-    @processing_csv = true
-    @barcode_line ||= CSV.read(absolute_filename).find {|line| line[0] == 'Assay Plate Barcode'}
-    @processing_csv = false
-    barcode_line
-  rescue ArgumentError
-    $stdout.puts "Argument error in csv file #{filename}"
-    barcode_line = nil
-  end
-
-  public
   def absolute_filename
-    @path + filename
+    path + filename
   end
 
   def lock
@@ -67,12 +67,36 @@ class FileMove
   end
 
   def move_to_errors
-    FileUtils.mv(@path + filename, ERRORS_FOLDER + filename)
+    FileUtils.mv(path + filename, ERRORS_FOLDER + filename)
   end
 
   def archive
-    FileUtils.mv(@path + filename, ARCHIVE_FOLDER + filename)
+    FileUtils.mv(path + filename, ARCHIVE_FOLDER + filename)
   end
+
+end
+
+class CsvQuantFileLocking
+  include Logging
+  include FileLocking
+
+  attr_reader :barcode_line, :processing_csv
+
+  def initialize(filename)
+    @filename = filename
+    @path = INBOX_FOLDER
+  end
+
+  def csv_plate_barcode_line
+    @processing_csv = true
+    @barcode_line ||= CSV.read(absolute_filename).find {|line| line[0] == 'Assay Plate Barcode'}
+    @processing_csv = false
+    barcode_line
+  rescue ArgumentError
+    logging_user "Argument error in csv file"
+    barcode_line = nil
+  end
+
 
   def valid_content?
     csv_plate_barcode_line
@@ -85,13 +109,24 @@ class FileMove
 
   def safe_shutdown
     if processing_csv
-      $stdout.puts "Something went wrong while processing csv file #{filename}"
+      logging_user "Something went wrong while processing csv file"
       move_to_errors
     end
   ensure
     unlock
   end
 
+  def relocate(code)
+    case code
+    when '500'
+      move_to_errors
+      logging_server "HTTP 500 server side problem"
+    when '503'
+      # stays in inbox folder
+    else
+      archive
+    end
+  end
 end
 
 
@@ -136,27 +171,24 @@ class QuantFileProcess
 end
 
 def process_file(filename)
-  current_filemove = FileMove.new(filename)
+  current_filemove = CsvQuantFileLocking.new(filename)
   if current_filemove.unlocked? && current_filemove.lock
-    return $stdout.puts "Barcode section was not found in the file #{current_filemove.absolute_filename}" unless current_filemove.barcode
+    return current_filemove.logging_user "Barcode section was not found in the file #{current_filemove.absolute_filename}" unless current_filemove.barcode
     quant_process = QuantFileProcess.new(current_filemove)
     quant_process.request_uuid
     if quant_process.uuid
       quant_process.upload_qc_file_to_ss_with_http
-      if quant_process.code == 500
-        current_filemove.move_to_errors
-        $stderr.puts "HTTP 500 server side problem"
-      elsif quant_process.code !=503
-        current_filemove.archive
-      end
+      current_filemove.relocate(quant_process.code)
     else
-      $stdout.puts "The barcode #{current_filemove.barcode} was not found in quant"
+      current_filemove.logging_user "The barcode #{current_filemove.barcode} was not found in quant"
     end
   end
 ensure
   current_filemove.safe_shutdown
 end
 
+
+#LOG_STDERR.error("testing standard error")
 
 Dir.entries(INBOX_FOLDER).each do |filename|
   process_file(filename) if filename.match(/\.csv$/i)

@@ -92,9 +92,9 @@ class CsvQuantFileLocking
     @barcode_line ||= CSV.read(absolute_filename).find {|line| line[0] == 'Assay Plate Barcode'}
     @processing_csv = false
     barcode_line
-  rescue ArgumentError
-    logging_user "Argument error in csv file"
-    barcode_line = nil
+  rescue StandardError
+    logging_user "Error while parsing csv file"
+    @barcode_line = nil
   end
 
 

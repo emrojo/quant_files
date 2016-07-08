@@ -117,14 +117,15 @@ class CsvQuantFileLocking
   end
 
   def relocate(code)
+    logging_server "code = #{code}"
     case code
-    when '500'
-      move_to_errors
-      logging_server "HTTP 500 server side problem"
     when '503'
       # stays in inbox folder
-    else
+    when '200','201'
       archive
+    else
+      move_to_errors
+      logging_server "HTTP #{code} error"
     end
   end
 end
